@@ -975,6 +975,7 @@ def main():
                         "🔌 Interfaces",
                         "🌐 Network",
                         "📋 Policy & Objects",
+                        "🔍 Policy Lookup",
                         "🔒 Security",
                         "🔑 VPN",
                         "👤 User & Auth",
@@ -992,16 +993,18 @@ def main():
                 with main_tabs[3]:
                     render_policy_objects(fg)
                 with main_tabs[4]:
-                    render_security(fg)
+                    render_policy_lookup(fg)
                 with main_tabs[5]:
-                    render_vpn(fg)
+                    render_security(fg)
                 with main_tabs[6]:
-                    render_user_auth(fg)
+                    render_vpn(fg)
                 with main_tabs[7]:
-                    render_wifi(fg)
+                    render_user_auth(fg)
                 with main_tabs[8]:
-                    render_system(fg)
+                    render_wifi(fg)
                 with main_tabs[9]:
+                    render_system(fg)
+                with main_tabs[10]:
                     render_log_settings(fg)
 
         except Exception as e:
