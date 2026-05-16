@@ -1,187 +1,165 @@
+"""
+views/policy_objects_view.py
+FortiGate — Policy & Objects tab.
+
+* Every table: search + column filter + CSV export via st_table
+* Inline Policy Lookup in Firewall Policy tab:
+    - src interface dropdown (all configured interfaces + 'any')
+    - dst interface dropdown (all configured interfaces + 'any')
+    - AND logic across all parameters
+    - Top-to-bottom evaluation, first match wins
+    - Implicit deny when no match
+"""
+
 import streamlit as st
 import pandas as pd
 import ipaddress
+from views.table_utils import st_table
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  IP / address matching helpers (self-contained so this file works standalone)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
-def _show_table(rows: list, empty_msg: str = "Not configured"):
-    if not rows:
-        st.info(empty_msg)
-        return
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
-
-def _highlight_disabled(df: pd.DataFrame):
-    def highlight(row):
-        if str(row.get("Status", "")).lower() == "disable":
-            return ["background-color: #fff3cd"] * len(row)
-        return [""] * len(row)
-
-    return df.style.apply(highlight, axis=1)
-
-
-def ip_in_subnet(ip, subnet_obj):
-
+def _ip_int(ip: str):
     try:
-        return ipaddress.IPv4Address(ip) in subnet_obj
+        return int(ipaddress.IPv4Address(ip.strip()))
+    except Exception:
+        return None
 
-    except:
+
+def _ip_in_net(ip: str, net: ipaddress.IPv4Network) -> bool:
+    try:
+        return ipaddress.IPv4Address(ip.strip()) in net
+    except Exception:
         return False
 
 
-def ip_in_range(ip, start_int, end_int):
-
-    try:
-
-        ip_int = int(ipaddress.IPv4Address(ip))
-
-        return start_int <= ip_int <= end_int
-
-    except:
-        return False
+def _ip_in_range(ip: str, start_int: int, end_int: int) -> bool:
+    tip = _ip_int(ip)
+    return tip is not None and start_int <= tip <= end_int
 
 
-def resolve_address_match(ip, addr_obj):
-
-    addr_type = str(addr_obj.get("Type", "")).lower()
-
-    # =====================================================
-    # SUBNET
-    # =====================================================
-
-    if addr_type == "subnet":
-
-        subnet_obj = addr_obj.get("network_obj")
-
-        if subnet_obj:
-
-            return ip_in_subnet(ip, subnet_obj)
-
-    # =====================================================
-    # IP RANGE
-    # =====================================================
-
-    elif addr_type == "ip range":
-
-        start_int = addr_obj.get("start_int")
-        end_int = addr_obj.get("end_int")
-
-        if start_int is not None and end_int is not None:
-
-            return ip_in_range(ip, start_int, end_int)
-
+def _resolve_addr_match(ip_str: str, addr_objects: list, obj_name: str) -> bool:
+    """Return True if ip_str falls within the named address object."""
+    if obj_name.lower() in ("all", "any", ""):
+        return True
+    for obj in addr_objects:
+        if obj.get("Name", "") != obj_name:
+            continue
+        t = str(obj.get("Type", "")).lower()
+        if t == "subnet":
+            net = obj.get("network_obj")
+            if net and _ip_in_net(ip_str, net):
+                return True
+        elif t == "ip range":
+            s = obj.get("start_int")
+            e = obj.get("end_int")
+            if s is not None and e is not None and _ip_in_range(ip_str, s, e):
+                return True
     return False
 
 
-def evaluate_policy_lookup(
+def _iface_ok(pol_val: str, user_val: str) -> bool:
+    if user_val.lower() == "any":
+        return True
+    pl = [x.strip().lower() for x in pol_val.split(",")]
+    return "any" in pl or user_val.lower() in pl
+
+
+def _evaluate_lookup(
     policies,
     parser,
-    incoming_interface,
-    ip_version,
-    protocol,
-    protocol_number,
-    src_port,
-    dst_port,
+    src_iface,
+    dst_iface,
     src_ip,
     dst_ip,
+    protocol,
+    proto_num,
+    src_port,
+    dst_port,
     icmp_type,
     icmp_code,
 ):
-
+    """
+    Evaluate policies top-to-bottom with AND logic across:
+      src interface, dst interface, src address, dst address, protocol.
+    Returns the first matching policy dict, or None (implicit deny).
+    """
     addresses = parser.parse_addresses()
+    addr_objs = addresses.get("subnet", []) + addresses.get("iprange", [])
 
-    all_addr_objects = addresses.get("subnet", []) + addresses.get("iprange", [])
+    # pre-build IPv4Network objects for subnet entries
+    for obj in addr_objs:
+        if obj.get("Type", "").lower() == "subnet" and "network_obj" not in obj:
+            try:
+                obj["network_obj"] = ipaddress.IPv4Network(
+                    obj.get("Details", "0.0.0.0/0"), strict=False
+                )
+            except Exception:
+                pass
 
-    # =====================================================
-    # POLICY ORDER: TOP -> BOTTOM
-    # =====================================================
-
-    for policy in policies:
-
-        # =================================================
-        # STATUS CHECK
-        # =================================================
-
-        if str(policy.get("Status", "")).lower() == "disable":
-
+    for pol in policies:
+        # skip disabled
+        if str(pol.get("Status", "Enable")).lower() == "disable":
             continue
 
-        # =================================================
-        # INCOMING INTERFACE MATCH
-        # =================================================
-
-        srcintf = str(policy.get("Source Interface", "")).lower()
-
-        if incoming_interface and incoming_interface.lower() not in srcintf:
-
+        # AND 1 — source / incoming interface
+        if not _iface_ok(str(pol.get("Src Interface", "any")), src_iface):
             continue
 
-        # =================================================
-        # SOURCE ADDRESS MATCH
-        # =================================================
-
-        srcaddr = str(policy.get("Source Address", ""))
-
-        src_match = False
-
-        if srcaddr.lower() == "all":
-
-            src_match = True
-
-        else:
-
-            for addr_obj in all_addr_objects:
-
-                if addr_obj["Name"] in srcaddr:
-
-                    if resolve_address_match(src_ip, addr_obj):
-
-                        src_match = True
-                        break
-
-        if not src_match:
+        # AND 2 — destination / outgoing interface
+        if not _iface_ok(str(pol.get("Dst Interface", "any")), dst_iface):
             continue
 
-        # =================================================
-        # DESTINATION ADDRESS MATCH
-        # =================================================
+        # AND 3 — source address (blank = any)
+        if src_ip.strip():
+            pol_src = str(pol.get("Source", "all"))
+            src_names = [n.strip() for n in pol_src.split(",")]
+            if not any(
+                n.lower() in ("all", "any") or _resolve_addr_match(src_ip, addr_objs, n)
+                for n in src_names
+            ):
+                continue
 
-        dstaddr = str(policy.get("Destination Address", ""))
+        # AND 4 — destination address (blank = any)
+        if dst_ip.strip():
+            pol_dst = str(pol.get("Destination", "all"))
+            dst_names = [n.strip() for n in pol_dst.split(",")]
+            if not any(
+                n.lower() in ("all", "any") or _resolve_addr_match(dst_ip, addr_objs, n)
+                for n in dst_names
+            ):
+                continue
 
-        dst_match = False
+        # AND 5 — protocol / service (if not 'any')
+        if protocol not in ("any", "ip"):
+            pol_svc = str(pol.get("Service", "ALL")).upper()
+            if not any(x in pol_svc for x in ("ALL", "ANY", protocol.upper())):
+                continue
 
-        if dstaddr.lower() == "all":
+        # first match
+        return pol
 
-            dst_match = True
+    return None  # implicit deny
 
-        else:
 
-            for addr_obj in all_addr_objects:
+# ═══════════════════════════════════════════════════════════════════════════════
+#  UI label helper
+# ═══════════════════════════════════════════════════════════════════════════════
 
-                if addr_obj["Name"] in dstaddr:
 
-                    if resolve_address_match(dst_ip, addr_obj):
+def _lbl(txt: str):
+    st.markdown(
+        f'<p style="margin:6px 0 2px;font-size:11px;color:#8b949e;'
+        f'font-weight:700;text-transform:uppercase">{txt}</p>',
+        unsafe_allow_html=True,
+    )
 
-                        dst_match = True
-                        break
 
-        if not dst_match:
-            continue
-
-        # =================================================
-        # MATCH FOUND
-        # =================================================
-
-        return {
-            "ID": policy.get("ID", "-"),
-            "Name": policy.get("Name", "-"),
-            "Action": policy.get("Action", "-"),
-        }
-
-    # =====================================================
-    # IMPLICIT DENY
-    # =====================================================
-
-    return None
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Main render
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
 def render_policy_objects(parser):
@@ -217,150 +195,288 @@ def render_policy_objects(parser):
         ]
     )
 
+    # ══════════════════════════════════════════════════════════════════════
+    #  Firewall Policy tab
+    # ══════════════════════════════════════════════════════════════════════
     with tab_fw:
         st.markdown("#### Firewall Policies")
-
         rows = parser.parse_policies()
 
-        # ======================================================
-        # POLICY LOOKUP
-        # ======================================================
+        # ── Interface list for dropdowns ───────────────────────────────────
+        iface_names = (
+            parser.get_interface_names()
+            if hasattr(parser, "get_interface_names")
+            else []
+        )
+        iface_opts = ["any"] + iface_names
 
+        # ── Policy Lookup expander ─────────────────────────────────────────
         with st.expander("🔍 Policy Lookup", expanded=False):
+            st.markdown(
+                '<div style="font-size:13px;color:#8b949e;margin-bottom:10px">'
+                "All parameters use <b>AND</b> logic. Evaluated <b>top-to-bottom</b>. "
+                "Leave any field blank or choose <b>any</b> for wildcard. "
+                "First match wins — no match = <b>implicit deny</b>.</div>",
+                unsafe_allow_html=True,
+            )
 
             col1, col2 = st.columns(2)
 
-            incoming_intf = col1.text_input("Incoming Interface", key="lookup_in_intf")
-
-            ip_version = col2.selectbox(
-                "IP Version", ["ipv4", "ipv6"], key="lookup_ipver"
-            )
-
-            protocol = st.selectbox(
-                "Protocol",
-                [
-                    "ip",
-                    "tcp",
-                    "udp",
-                    "sctp",
-                    "icmp",
-                    "icmp ping request",
-                    "icmp ping reply",
-                ],
-                key="lookup_proto",
-            )
-
-            protocol_number = src_port = dst_port = icmp_type = icmp_code = None
-
-            # ==================================================
-            # PROTOCOL OPTIONS
-            # ==================================================
-
-            if protocol == "ip":
-
-                protocol_number = st.number_input(
-                    "Protocol Number", 0, 255, 0, key="lookup_proto_num"
+            with col1:
+                _lbl("🔌 Source / Incoming Interface")
+                src_iface = st.selectbox(
+                    "src_iface_pol",
+                    iface_opts,
+                    index=0,
+                    key="po_lu_src_iface",
+                    label_visibility="collapsed",
+                    help="Matches policy srcintf. 'any' = wildcard.",
                 )
 
-            elif protocol in ["tcp", "udp", "sctp"]:
+                _lbl("🌐 IP Version")
+                ip_version = st.selectbox(
+                    "ipver_pol",
+                    ["any", "ipv4", "ipv6"],
+                    index=0,
+                    key="po_lu_ipver",
+                    label_visibility="collapsed",
+                )
 
-                c1, c2 = st.columns(2)
-                src_port = c1.number_input("Source Port", 1, 65535, 1)
-                dst_port = c2.number_input("Destination Port", 1, 65535, 80)
+                _lbl("📤 Source IP / Address")
+                src_ip = st.text_input(
+                    "src_ip_pol",
+                    value="",
+                    key="po_lu_src_ip",
+                    placeholder="e.g. 10.0.0.1  or blank for any",
+                    label_visibility="collapsed",
+                )
 
-            elif protocol == "icmp":
+                _lbl("📥 Destination IP / FQDN")
+                dst_ip = st.text_input(
+                    "dst_ip_pol",
+                    value="",
+                    key="po_lu_dst_ip",
+                    placeholder="e.g. 8.8.8.8  or blank for any",
+                    label_visibility="collapsed",
+                )
 
-                c1, c2 = st.columns(2)
-                icmp_type = c1.number_input("ICMP Type", 0, 255, 8)
-                icmp_code = c2.number_input("ICMP Code", 0, 255, 0)
+            with col2:
+                _lbl("🎯 Destination / Outgoing Interface")
+                dst_iface = st.selectbox(
+                    "dst_iface_pol",
+                    iface_opts,
+                    index=0,
+                    key="po_lu_dst_iface",
+                    label_visibility="collapsed",
+                    help="Matches policy dstintf. 'any' = wildcard.",
+                )
 
-            c1, c2 = st.columns(2)
-            src_ip = c1.text_input("Source IP / Address")
-            dst_ip = c2.text_input("Destination IP / FQDN")
+                _lbl("⚙️ Protocol")
+                protocol = st.selectbox(
+                    "proto_pol",
+                    [
+                        "any",
+                        "ip",
+                        "tcp",
+                        "udp",
+                        "sctp",
+                        "icmp",
+                        "icmp ping request",
+                        "icmp ping reply",
+                    ],
+                    index=0,
+                    key="po_lu_proto",
+                    label_visibility="collapsed",
+                )
 
-        # ==================================================
-        # SOURCE / DESTINATION
-        # =================================================
+                proto_num = src_port = dst_port = icmp_type = icmp_code = None
 
-        # ==================================================
-        # LOOKUP BUTTON
-        # ==================================================
+                if protocol == "ip":
+                    proto_num = st.number_input(
+                        "Protocol Number", 0, 255, 0, key="po_lu_pnum"
+                    )
+                elif protocol in ("tcp", "udp", "sctp"):
+                    _lbl("📡 Source Port  (blank = any)")
+                    sp = st.text_input(
+                        "src_port_pol",
+                        value="",
+                        key="po_lu_sport",
+                        placeholder="e.g. 1024 — optional",
+                        label_visibility="collapsed",
+                    )
+                    _lbl("📡 Destination Port  (blank = any)")
+                    dp = st.text_input(
+                        "dst_port_pol",
+                        value="",
+                        key="po_lu_dport",
+                        placeholder="e.g. 443 — optional",
+                        label_visibility="collapsed",
+                    )
+                    try:
+                        src_port = int(sp) if sp.strip() else None
+                    except ValueError:
+                        src_port = None
+                    try:
+                        dst_port = int(dp) if dp.strip() else None
+                    except ValueError:
+                        dst_port = None
+                elif protocol == "icmp":
+                    icmp_type = st.number_input("ICMP Type", 0, 255, 8, key="po_lu_it")
+                    icmp_code = st.number_input("ICMP Code", 0, 255, 0, key="po_lu_ic")
+                elif protocol == "icmp ping request":
+                    icmp_type, icmp_code = 8, 0
+                    st.info("ICMP Type 8 / Code 0 — Echo Request")
+                elif protocol == "icmp ping reply":
+                    icmp_type, icmp_code = 0, 0
+                    st.info("ICMP Type 0 / Code 0 — Echo Reply")
 
-        if st.button("Evaluate Policy"):
+            # ── Run button ─────────────────────────────────────────────────
+            if st.button("▶ Evaluate Policy", key="po_lu_btn", type="primary"):
+                if not rows:
+                    st.warning("No policies found.")
+                else:
+                    result = _evaluate_lookup(
+                        rows,
+                        parser,
+                        src_iface,
+                        dst_iface,
+                        src_ip,
+                        dst_ip,
+                        protocol,
+                        proto_num,
+                        src_port,
+                        dst_port,
+                        icmp_type,
+                        icmp_code,
+                    )
+                    st.markdown("---")
+                    if result:
+                        action = str(result.get("Action", "-")).upper()
+                        ac = "#3fb950" if action == "ACCEPT" else "#f85149"
+                        ab = "#0d2b15" if action == "ACCEPT" else "#2b0d0d"
+                        icon = "✅" if action == "ACCEPT" else "🚫"
+                        st.markdown(
+                            f'<div style="background:{ab};border:2px solid {ac}55;'
+                            f'border-radius:14px;padding:18px 22px">'
+                            f'<div style="font-size:11px;color:{ac};font-weight:700;'
+                            f'text-transform:uppercase;margin-bottom:8px">'
+                            f"{icon} First Matching Policy</div>"
+                            f'<div style="display:flex;gap:28px;flex-wrap:wrap;align-items:flex-end">'
+                            + "".join(
+                                [
+                                    f'<div><div style="font-size:11px;color:#8b949e">{lb}</div>'
+                                    f'<div style="font-size:{sz};font-weight:900;color:{cl};'
+                                    f'line-height:1.1">{val}</div></div>'
+                                    for lb, val, sz, cl in [
+                                        (
+                                            "Policy ID",
+                                            f'#{result.get("ID","?")}',
+                                            "24px",
+                                            "#e6edf3",
+                                        ),
+                                        (
+                                            "Name",
+                                            result.get("Name", "-"),
+                                            "16px",
+                                            "#e6edf3",
+                                        ),
+                                        ("Action", action, "24px", ac),
+                                        (
+                                            "Src Interface",
+                                            result.get("Src Interface", "-"),
+                                            "13px",
+                                            "#e6edf3",
+                                        ),
+                                        (
+                                            "Dst Interface",
+                                            result.get("Dst Interface", "-"),
+                                            "13px",
+                                            "#e6edf3",
+                                        ),
+                                        (
+                                            "Service",
+                                            result.get("Service", "-"),
+                                            "13px",
+                                            "#e6edf3",
+                                        ),
+                                        (
+                                            "NAT",
+                                            result.get("NAT", "-"),
+                                            "13px",
+                                            "#e6edf3",
+                                        ),
+                                    ]
+                                ]
+                            )
+                            + "</div></div>",
+                            unsafe_allow_html=True,
+                        )
+                        st_table(
+                            [result],
+                            key="po_lu_result",
+                            export_filename="policy_lookup_result.csv",
+                        )
+                    else:
+                        st.markdown(
+                            '<div style="background:#2b0d0d;border:2px solid #f8514955;'
+                            'border-radius:14px;padding:18px 22px">'
+                            '<div style="font-size:18px;font-weight:800;color:#f85149;'
+                            'margin-bottom:6px">❌ No Matching Policy — Implicit DENY</div>'
+                            '<div style="font-size:13px;color:#cdd9e5">'
+                            "Traffic would be dropped by the implicit deny rule.</div></div>",
+                            unsafe_allow_html=True,
+                        )
 
-            result = evaluate_policy_lookup(
-                policies=rows,
-                parser=parser,
-                incoming_interface=incoming_intf,
-                ip_version=ip_version,
-                protocol=protocol,
-                protocol_number=protocol_number,
-                src_port=src_port,
-                dst_port=dst_port,
-                src_ip=src_ip,
-                dst_ip=dst_ip,
-                icmp_type=icmp_type,
-                icmp_code=icmp_code,
-            )
+        # ── Firewall Policy table ──────────────────────────────────────────
+        def _hl_pol(row):
+            if str(row.get("Status", "")).lower() == "disable":
+                return ["background-color:#fff3cd"] * len(row)
+            return [""] * len(row)
 
-            st.markdown("### Result")
-
-            if result:
-                st.success(f"""
-ID: {result['ID']}
-Name: {result['Name']}
-Action: {result['Action']}
-""")
-            else:
-                st.error("Implicit Deny")
-
-        # ===============================
-        # POLICY TABLE
-        # ===============================
         if rows:
-
-            df = pd.DataFrame(rows)
-
-            st.dataframe(
-                _highlight_disabled(df), use_container_width=True, hide_index=True
+            st_table(
+                rows,
+                key="fg_fw_policies",
+                style_fn=_hl_pol,
+                export_filename="fg_firewall_policies.csv",
+                caption=f"{len(rows)} policies",
             )
-
-            # ----------------------------
-            # CSV EXPORT (Firewall Policies)
-            # ----------------------------
-            csv = df.to_csv(index=False).encode("utf-8")
-
-            st.download_button(
-                "⬇ Export Firewall Policies (CSV)",
-                data=csv,
-                file_name="firewall_policies.csv",
-                mime="text/csv",
-            )
-
         else:
             st.info("No firewall policies found.")
 
+    # ── Proxy Policy ──────────────────────────────────────────
     with tab_proxy:
         st.markdown("#### Proxy Policies")
         rows = parser.parse_proxy_policy()
+
+        def _hl_pp(row):
+            if str(row.get("Status", "")).lower() == "disable":
+                return ["background-color:#fff3cd"] * len(row)
+            return [""] * len(row)
+
         if rows:
-            st.dataframe(
-                _highlight_disabled(pd.DataFrame(rows)),
-                use_container_width=True,
-                hide_index=True,
+            st_table(
+                rows,
+                key="fg_proxy_pol",
+                style_fn=_hl_pp,
+                export_filename="fg_proxy_policies.csv",
             )
         else:
             st.info("No proxy policies found.")
 
+    # ── Auth Rules ────────────────────────────────────────────
     with tab_auth:
         st.markdown("#### Authentication Rules")
-        _show_table(parser.parse_auth_rules(), "No authentication rules found.")
+        rows = parser.parse_auth_rules()
+        if rows:
+            st_table(rows, key="fg_auth_rules", export_filename="fg_auth_rules.csv")
+        else:
+            st.info("No authentication rules found.")
 
+    # ── Addresses ─────────────────────────────────────────────
     with tab_addr:
         st.markdown("#### Addresses")
-
         addr = parser.parse_addresses()
-
         a1, a2, a3, a4, a5, a6 = st.tabs(
             [
                 "Subnet / IP Mask",
@@ -371,103 +487,37 @@ Action: {result['Action']}
                 "Host Regex",
             ]
         )
+        _INTERNAL = {
+            "network_obj",
+            "network",
+            "broadcast",
+            "prefixlen",
+            "start_int",
+            "end_int",
+        }
+        for subtab, data_key, key_sfx, label in [
+            (a1, "subnet", "subnet", "Subnet"),
+            (a2, "iprange", "iprange", "IP Range"),
+            (a3, "fqdn", "fqdn", "FQDN"),
+            (a4, "ipmask", "ipmask", "Interface Subnet"),
+            (a5, "groups", "groups", "Address Groups"),
+            (a6, "regex", "regex", "Host Regex"),
+        ]:
+            with subtab:
+                raw = addr.get(data_key, [])
+                clean = [
+                    {k: v for k, v in r.items() if k not in _INTERNAL} for r in raw
+                ]
+                if clean:
+                    st_table(
+                        clean,
+                        key=f"fg_addr_{key_sfx}",
+                        export_filename=f"fg_addr_{key_sfx}.csv",
+                    )
+                else:
+                    st.info(f"No {label} addresses.")
 
-        # =========================
-        # SUBNET
-        # =========================
-        with a1:
-            rows = addr.get("subnet", [])
-            _show_table(rows, "No subnet addresses.")
-
-            if rows:
-                st.download_button(
-                    "⬇ Export Subnet CSV",
-                    pd.DataFrame(rows).to_csv(index=False).encode("utf-8"),
-                    file_name="subnet.csv",
-                    mime="text/csv",
-                    key="dl_subnet",
-                )
-
-        # =========================
-        # IP RANGE
-        # =========================
-        with a2:
-            rows = addr.get("iprange", [])
-            _show_table(rows, "No IP range addresses.")
-
-            if rows:
-                st.download_button(
-                    "⬇ Export IP Range CSV",
-                    pd.DataFrame(rows).to_csv(index=False).encode("utf-8"),
-                    file_name="iprange.csv",
-                    mime="text/csv",
-                    key="dl_iprange",
-                )
-
-        # =========================
-        # FQDN
-        # =========================
-        with a3:
-            rows = addr.get("fqdn", [])
-            _show_table(rows, "No FQDN addresses.")
-
-            if rows:
-                st.download_button(
-                    "⬇ Export FQDN CSV",
-                    pd.DataFrame(rows).to_csv(index=False).encode("utf-8"),
-                    file_name="fqdn.csv",
-                    mime="text/csv",
-                    key="dl_fqdn",
-                )
-
-        # =========================
-        # INTERFACE SUBNET
-        # =========================
-        with a4:
-            rows = addr.get("ipmask", [])
-            _show_table(rows, "No interface subnet addresses.")
-
-            if rows:
-                st.download_button(
-                    "⬇ Export Interface Subnet CSV",
-                    pd.DataFrame(rows).to_csv(index=False).encode("utf-8"),
-                    file_name="ipmask.csv",
-                    mime="text/csv",
-                    key="dl_ipmask",
-                )
-
-        # =========================
-        # GROUPS
-        # =========================
-        with a5:
-            rows = addr.get("groups", [])
-            _show_table(rows, "No address groups.")
-
-            if rows:
-                st.download_button(
-                    "⬇ Export Groups CSV",
-                    pd.DataFrame(rows).to_csv(index=False).encode("utf-8"),
-                    file_name="groups.csv",
-                    mime="text/csv",
-                    key="dl_groups",
-                )
-
-        # =========================
-        # REGEX
-        # =========================
-        with a6:
-            rows = addr.get("regex", [])
-            _show_table(rows, "No host regex addresses.")
-
-            if rows:
-                st.download_button(
-                    "⬇ Export Regex CSV",
-                    pd.DataFrame(rows).to_csv(index=False).encode("utf-8"),
-                    file_name="regex.csv",
-                    mime="text/csv",
-                    key="dl_regex",
-                )
-
+    # ── Services ──────────────────────────────────────────────
     with tab_svc:
         st.markdown("#### Services")
         svc_data = parser.parse_services()
@@ -481,23 +531,39 @@ Action: {result['Action']}
         else:
             all_cats = sorted(set(s["Category"] for s in services))
             selected = st.multiselect(
-                "Filter by Category", all_cats, default=all_cats, key="svc_cat_filter"
+                "Filter by Category", all_cats, default=all_cats, key="svc_cat"
             )
             filtered = [s for s in services if s["Category"] in selected]
-            _show_table(filtered, "No services match the filter.")
+            st_table(filtered, key="fg_services", export_filename="fg_services.csv")
 
+    # ── Schedules ─────────────────────────────────────────────
     with tab_sched:
         st.markdown("#### Schedules")
-        _show_table(parser.parse_schedules(), "No schedules found.")
+        rows = parser.parse_schedules()
+        if rows:
+            st_table(rows, key="fg_schedules", export_filename="fg_schedules.csv")
+        else:
+            st.info("No schedules found.")
 
+    # ── Virtual IPs ───────────────────────────────────────────
     with tab_vip:
         st.markdown("#### Virtual IPs (NAT)")
-        _show_table(parser.parse_vip(), "No Virtual IPs found.")
+        rows = parser.parse_vip()
+        if rows:
+            st_table(rows, key="fg_vips", export_filename="fg_virtual_ips.csv")
+        else:
+            st.info("No Virtual IPs found.")
 
+    # ── IP Pools ──────────────────────────────────────────────
     with tab_pool:
         st.markdown("#### IP Pools")
-        _show_table(parser.parse_ip_pools(), "No IP pools found.")
+        rows = parser.parse_ip_pools()
+        if rows:
+            st_table(rows, key="fg_ip_pools", export_filename="fg_ip_pools.csv")
+        else:
+            st.info("No IP pools found.")
 
+    # ── Protocol Options ──────────────────────────────────────
     with tab_proto:
         st.markdown("#### Protocol Options")
         rows = parser.parse_protocol_options()
@@ -505,20 +571,39 @@ Action: {result['Action']}
             st.info("No protocol options profiles found.")
         else:
             profiles = sorted(set(r["Profile"] for r in rows))
-            selected_profile = st.selectbox(
-                "Select Profile", profiles, key="proto_profile"
+            sel = st.selectbox("Select Profile", profiles, key="proto_prof")
+            filtered = [r for r in rows if r["Profile"] == sel]
+            st_table(
+                filtered, key="fg_proto_opts", export_filename="fg_protocol_options.csv"
             )
-            filtered = [r for r in rows if r["Profile"] == selected_profile]
-            _show_table(filtered)
 
+    # ── Traffic Shaping ───────────────────────────────────────
     with tab_shaper:
         st.markdown("#### Traffic Shaping")
-        _show_table(parser.parse_traffic_shaping(), "No traffic shapers found.")
+        rows = parser.parse_traffic_shaping()
+        if rows:
+            st_table(
+                rows, key="fg_traffic_shaping", export_filename="fg_traffic_shaping.csv"
+            )
+        else:
+            st.info("No traffic shapers found.")
 
+    # ── Virtual Servers ───────────────────────────────────────
     with tab_vserver:
         st.markdown("#### Virtual Servers")
-        _show_table(parser.parse_virtual_servers(), "No virtual servers found.")
+        rows = parser.parse_virtual_servers()
+        if rows:
+            st_table(rows, key="fg_vservers", export_filename="fg_virtual_servers.csv")
+        else:
+            st.info("No virtual servers found.")
 
+    # ── Health Check ──────────────────────────────────────────
     with tab_hc:
         st.markdown("#### Health Checks (LDB Monitor)")
-        _show_table(parser.parse_health_check(), "No health check monitors found.")
+        rows = parser.parse_health_check()
+        if rows:
+            st_table(
+                rows, key="fg_health_checks", export_filename="fg_health_checks.csv"
+            )
+        else:
+            st.info("No health check monitors found.")

@@ -1,70 +1,60 @@
+"""views/interface_view.py — FortiGate & Palo Alto interface tables."""
+
 import streamlit as st
 import pandas as pd
+from views.table_utils import st_table
 
 
-def render_interfaces(rows: list, vendor: str):
-
+def render_interface_table(rows: list, vendor: str):
     st.subheader(f"Interface Configuration — {vendor}")
-
-    if not isinstance(rows, list):
-        st.error(f"Invalid interface data type: {type(rows)}")
-        return
-
-    if len(rows) == 0:
+    if not rows:
         st.warning("No interface data found.")
-        return
-
-    # ensure list of dicts
-    if isinstance(rows[0], str):
-        st.error("Interface data is not structured (string list detected)")
         return
 
     df = pd.DataFrame(rows)
 
-    # Colour coding
-    def style_row(row):
+    def _style(row):
         name = str(row.get("Name", ""))
         status = str(row.get("Status", "Enable")).lower()
         itype = str(row.get("Type", "")).lower()
-
-        # Zone header row
         if itype == "zone":
             return ["background-color:#dfe6e9;font-weight:bold;color:#2c3e50"] * len(
                 row
             )
-        # Disabled interface
         if status == "disable":
             return [
                 "background-color:#fdecea;color:#999;text-decoration:line-through"
             ] * len(row)
-        # Hardware switch
         if itype == "hardwareswitch":
             return ["background-color:#eaf4fb"] * len(row)
-        # VLAN (indented child)
         if "\u2517" in name or "\u00a0" in name:
             return ["background-color:#f8f9fa"] * len(row)
         return [""] * len(row)
 
-    st.markdown(
-        """
-    <style>
-    .legend-box {display:inline-block;width:14px;height:14px;border-radius:3px;margin-right:5px;vertical-align:middle}
-    </style>
-    <div style="margin-bottom:12px;display:flex;gap:20px;flex-wrap:wrap">
-        <span><span class="legend-box" style="background:#dfe6e9"></span>Zone</span>
-        <span><span class="legend-box" style="background:#eaf4fb"></span>Hardware Switch</span>
-        <span><span class="legend-box" style="background:#f8f9fa"></span>Sub-interface / VLAN</span>
-        <span><span class="legend-box" style="background:#fdecea"></span>Disabled</span>
-    </div>
-    """,
+    # ── legend — uses st.columns so no raw HTML colour boxes needed ───────────
+    c1, c2, c3, c4 = st.columns(4)
+    c1.markdown(
+        '<div style="background:#dfe6e9;border-radius:6px;padding:5px 10px;'
+        'font-size:12px;font-weight:600;color:#2c3e50;text-align:center">📦 Zone</div>',
         unsafe_allow_html=True,
     )
-
-    st.dataframe(
-        df.style.apply(style_row, axis=1),
-        use_container_width=True,
-        hide_index=True,
+    c2.markdown(
+        '<div style="background:#eaf4fb;border-radius:6px;padding:5px 10px;'
+        'font-size:12px;color:#1a6e96;text-align:center">🔌 Hardware Switch</div>',
+        unsafe_allow_html=True,
     )
+    c3.markdown(
+        '<div style="background:#f8f9fa;border-radius:6px;padding:5px 10px;'
+        'font-size:12px;color:#555;text-align:center">↳ Sub-interface / VLAN</div>',
+        unsafe_allow_html=True,
+    )
+    c4.markdown(
+        '<div style="background:#fdecea;border-radius:6px;padding:5px 10px;'
+        'font-size:12px;color:#c0392b;text-align:center">🔴 Disabled</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown("<div style='margin-bottom:8px'></div>", unsafe_allow_html=True)
+
     total = len([r for r in rows if r.get("Type", "").lower() != "zone"])
     enabled = len(
         [
@@ -74,8 +64,17 @@ def render_interfaces(rows: list, vendor: str):
             and r.get("Type", "").lower() != "zone"
         ]
     )
-    disabled = total - enabled
     zones = len([r for r in rows if r.get("Type", "").lower() == "zone"])
-    st.caption(
-        f"Total: {total} interfaces | ✅ {enabled} enabled | 🔴 {disabled} disabled | 📦 {zones} zones"
+    vkey = vendor.lower().replace(" ", "_")
+
+    st_table(
+        df,
+        key=f"iface_{vkey}",
+        style_fn=_style,
+        caption=f"✅ {enabled} enabled · 🔴 {total-enabled} disabled · 📦 {zones} zones",
+        export_filename=f"{vkey}_interfaces.csv",
     )
+
+
+def render_interfaces(rows: list, vendor: str):
+    render_interface_table(rows, vendor)

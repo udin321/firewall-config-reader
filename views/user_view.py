@@ -1,111 +1,132 @@
+"""views/user_view.py — FortiGate User & Auth tab with search + CSV on every table."""
+
 import streamlit as st
 import pandas as pd
-
-
-def _show_table(rows, empty_msg="Not configured"):
-    if not rows:
-        st.info(empty_msg)
-        return
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+from views.table_utils import st_table
 
 
 def _toggle(label, value):
     on = str(value).lower() in ["enable", "on", "1", "true"]
-    color = "#2ecc71" if on else "#ccc"
-    bg    = "#e8f8f0" if on else "#f5f5f5"
-    text  = "ON" if on else "OFF"
+    col = "#2ecc71" if on else "#ccc"
+    bg = "#e8f8f0" if on else "#f5f5f5"
+    text = "ON" if on else "OFF"
     st.markdown(
         f'<div style="display:flex;align-items:center;justify-content:space-between;'
-        f'background:{bg};border-radius:8px;padding:8px 14px;margin:4px 0;">'
+        f'background:{bg};border-radius:8px;padding:8px 14px;margin:4px 0">'
         f'<span style="font-size:13px">{label}</span>'
-        f'<span style="background:{color};color:white;padding:2px 12px;'
+        f'<span style="background:{col};color:white;padding:2px 12px;'
         f'border-radius:12px;font-size:12px;font-weight:bold">{text}</span></div>',
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
 
 def render_user_auth(parser):
     st.subheader("User & Authentication")
 
-    tab_users, tab_groups, tab_guest, tab_ldap, tab_radius, tab_fsso, tab_token, tab_auth = st.tabs([
-        "User Definition", "User Groups", "Guest Management",
-        "LDAP Servers", "RADIUS Servers", "Single Sign-On",
-        "FortiToken", "Auth Settings"
-    ])
+    tabs = st.tabs(
+        [
+            "User Definition",
+            "User Groups",
+            "Guest Management",
+            "LDAP Servers",
+            "RADIUS Servers",
+            "Single Sign-On",
+            "FortiToken",
+            "Auth Settings",
+        ]
+    )
 
-    with tab_users:
+    with tabs[0]:
         st.markdown("#### User Definitions")
         rows = parser.parse_user_local()
         if rows:
-            df = pd.DataFrame(rows)
-            def highlight_status(row):
-                if str(row.get("Status","")).lower() == "disable":
+
+            def _hl(row):
+                if str(row.get("Status", "")).lower() == "disable":
                     return ["background-color:#fff3cd"] * len(row)
                 return [""] * len(row)
-            st.dataframe(df.style.apply(highlight_status, axis=1), use_container_width=True, hide_index=True)
+
+            st_table(rows, key="fg_users", style_fn=_hl, export_filename="fg_users.csv")
         else:
             st.info("No local users configured.")
 
-    with tab_groups:
+    with tabs[1]:
         st.markdown("#### User Groups")
-        _show_table(parser.parse_user_groups(), "No user groups configured.")
+        rows = parser.parse_user_groups()
+        if rows:
+            st_table(rows, key="fg_user_groups", export_filename="fg_user_groups.csv")
+        else:
+            st.info("No user groups configured.")
 
-    with tab_guest:
+    with tabs[2]:
         st.markdown("#### Guest Management")
-        _show_table(parser.parse_guest_users(), "No guest users configured.")
+        rows = parser.parse_guest_users()
+        if rows:
+            st_table(rows, key="fg_guest_users", export_filename="fg_guest_users.csv")
+        else:
+            st.info("No guest users configured.")
 
-    with tab_ldap:
+    with tabs[3]:
         st.markdown("#### LDAP Servers")
-        _show_table(parser.parse_ldap(), "No LDAP servers configured.")
+        rows = parser.parse_ldap()
+        if rows:
+            st_table(rows, key="fg_ldap", export_filename="fg_ldap_servers.csv")
+        else:
+            st.info("No LDAP servers configured.")
 
-    with tab_radius:
+    with tabs[4]:
         st.markdown("#### RADIUS Servers")
-        _show_table(parser.parse_radius(), "No RADIUS servers configured.")
+        rows = parser.parse_radius()
+        if rows:
+            st_table(rows, key="fg_radius", export_filename="fg_radius_servers.csv")
+        else:
+            st.info("No RADIUS servers configured.")
 
-    with tab_fsso:
+    with tabs[5]:
         st.markdown("#### Single Sign-On (FSSO)")
-        _show_table(parser.parse_fsso(), "No FSSO agents configured.")
+        rows = parser.parse_fsso()
+        if rows:
+            st_table(rows, key="fg_fsso", export_filename="fg_fsso.csv")
+        else:
+            st.info("No FSSO agents configured.")
 
-    with tab_token:
+    with tabs[6]:
         st.markdown("#### FortiToken")
         rows = parser.parse_fortitoken()
         if rows:
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-            st.caption(f"Total tokens: {len(rows)}")
+            st_table(
+                rows,
+                key="fg_fortitoken",
+                caption=f"Total: {len(rows)} tokens",
+                export_filename="fg_fortitokens.csv",
+            )
         else:
             st.info("No FortiTokens configured.")
 
-    with tab_auth:
+    with tabs[7]:
         st.markdown("#### Authentication Settings")
         auth = parser.parse_auth_settings()
         if auth:
             c1, c2 = st.columns(2)
             c1.metric("Auth Certificate", auth.get("auth_cert", "-"))
-            c2.metric("Auth Timeout",     f"{auth.get('auth_timeout', '5')} minutes")
-
+            c2.metric("Auth Timeout", f"{auth.get('auth_timeout','5')} minutes")
             st.divider()
-            st.markdown("#### User Authentication Options")
             st.markdown("**Protocol Support**")
-
-            # auth_type is a space-separated list like "http https" or "http https telnet ssh"
-            auth_type_raw = auth.get("auth_type", "http https")
-            active_protos = [p.strip().upper() for p in auth_type_raw.split()]
-
-            # Show all 4 protocols as enabled/disabled badges
-            all_protos = ["HTTP", "HTTPS", "TELNET", "SSH"]
-            cols = st.columns(len(all_protos))
-            for col, proto in zip(cols, all_protos):
-                enabled = proto in active_protos
-                bg  = "#2ecc71" if enabled else "#e74c3c"
+            active = [
+                p.strip().upper() for p in auth.get("auth_type", "http https").split()
+            ]
+            for col, proto in zip(st.columns(4), ["HTTP", "HTTPS", "TELNET", "SSH"]):
+                ok = proto in active
                 col.markdown(
-                    f'<div style="background:{bg};color:white;border-radius:10px;'
-                    f'padding:10px;text-align:center;font-weight:bold;font-size:14px">'
-                    f'{proto}<br><span style="font-size:11px">{"ON" if enabled else "OFF"}</span></div>',
-                    unsafe_allow_html=True
+                    f'<div style="background:{"#2ecc71" if ok else "#e74c3c"};'
+                    f"color:white;border-radius:10px;padding:10px;text-align:center;"
+                    f'font-weight:bold">{proto}<br>'
+                    f'<span style="font-size:11px">{"ON" if ok else "OFF"}</span></div>',
+                    unsafe_allow_html=True,
                 )
-
             st.divider()
-            st.markdown("**HTTP Redirect**")
-            _toggle("HTTP Redirect to Auth Portal", auth.get("http_redirect", "disable"))
+            _toggle(
+                "HTTP Redirect to Auth Portal", auth.get("http_redirect", "disable")
+            )
         else:
             st.info("No authentication settings found.")

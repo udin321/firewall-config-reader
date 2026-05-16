@@ -6,7 +6,6 @@ from .vpn_parser import VPNParserMixin
 from .user_parser import UserParserMixin
 from .wifi_parser import WiFiParserMixin
 from .system_parser import SystemParserMixin
-from .fortigate_logs import LOGSparserMixin
 
 
 class FortiGateParser(
@@ -16,7 +15,6 @@ class FortiGateParser(
     UserParserMixin,
     WiFiParserMixin,
     SystemParserMixin,
-    LOGSparserMixin,
 ):
 
     def _extract_block(self, keyword: str) -> str:
@@ -1449,4 +1447,158 @@ class FortiGateParser(
             "enabled": mode_m.group(1).capitalize() if mode_m else "Disable",
             "interfaces": interfaces,
             "pim_sm": pim_sm,
+        }
+
+    # ═══════════════════════════════════════════════════════════
+    #  INTERFACE NAMES  (Policy Lookup dropdown)
+    # ═══════════════════════════════════════════════════════════
+    def get_interface_names(self) -> list:
+        block = self._extract_block("system interface")
+        names = re.findall(r'^\s*edit "([^"]+)"', block, re.MULTILINE) if block else []
+        zone_block = self._extract_block("system zone")
+        if zone_block:
+            names += re.findall(r'^\s*edit "([^"]+)"', zone_block, re.MULTILINE)
+        return sorted(set(names))
+
+    # ═══════════════════════════════════════════════════════════
+    #  ADDRESS OBJECTS  (Policy Lookup matching)
+    # ═══════════════════════════════════════════════════════════
+    def get_address_objects(self) -> dict:
+        addr_map: dict = {}
+        block = self._extract_block("firewall address")
+        if block:
+            for name, body in re.findall(
+                r'^\s*edit "([^"]+)"(.*?)^\s*next', block, re.DOTALL | re.MULTILINE
+            ):
+                nets = []
+                subnet_m = re.search(r"set subnet ([\d\.]+)\s+([\d\.]+)", body)
+                start_m = re.search(r"set start-ip ([\d\.]+)", body)
+                end_m = re.search(r"set end-ip ([\d\.]+)", body)
+                fqdn_m = re.search(r'set fqdn "([^"]+)"', body)
+                if subnet_m:
+                    try:
+                        nets.append(
+                            ipaddress.IPv4Network(
+                                f"{subnet_m.group(1)}/{subnet_m.group(2)}", strict=False
+                            )
+                        )
+                    except ValueError:
+                        pass
+                elif start_m and end_m:
+                    try:
+                        nets.append(
+                            (
+                                int(ipaddress.IPv4Address(start_m.group(1))),
+                                int(ipaddress.IPv4Address(end_m.group(1))),
+                            )
+                        )
+                    except ValueError:
+                        pass
+                elif fqdn_m:
+                    nets.append(fqdn_m.group(1))
+                addr_map[name] = nets
+        grp_block = self._extract_block("firewall addrgrp")
+        if grp_block:
+            for name, body in re.findall(
+                r'^\s*edit "([^"]+)"(.*?)^\s*next', grp_block, re.DOTALL | re.MULTILINE
+            ):
+                member_m = re.search(r"set member (.*)", body)
+                if member_m:
+                    addr_map[name] = re.findall(r'"([^"]+)"', member_m.group(1))
+        return addr_map
+
+    def resolve_address(self, name: str, addr_map: dict, _depth: int = 0) -> list:
+        if name.lower() in ("all", "any", ""):
+            return []
+        if _depth > 10:
+            return []
+        resolved = []
+        for obj in addr_map.get(name, []):
+            if isinstance(obj, (ipaddress.IPv4Network, tuple)):
+                resolved.append(obj)
+            elif isinstance(obj, str):
+                sub = self.resolve_address(obj, addr_map, _depth + 1)
+                resolved.extend(sub) if sub else resolved.append(obj)
+        return resolved
+
+    # ═══════════════════════════════════════════════════════════
+    #  LOG SETTINGS
+    # ═══════════════════════════════════════════════════════════
+    def parse_log_settings(self) -> dict:
+        block = self._extract_block("log setting")
+        mem_block = self._extract_block("log memory setting")
+        sys_block = self._extract_block("log null-device setting")
+
+        def g(b: str, pattern: str, default: str = "disable") -> str:
+            m = re.search(pattern, b)
+            return m.group(1) if m else default
+
+        return {
+            "uuid_traffic": g(block, r"set fwpolicy-implicit-log (\S+)"),
+            "address_logging": g(block, r"set local-in-allow (\S+)"),
+            "event_logging": g(block, r"set local-in-deny-unicast (\S+)"),
+            "local_traffic": g(block, r"set local-in-deny-broadcast (\S+)"),
+            "memory": g(mem_block, r"set status (\S+)", "enable"),
+            "syslog": g(sys_block, r"set status (\S+)", "disable"),
+            "resolve_hosts": g(block, r"set resolve-ip (\S+)", "enable"),
+            "resolve_apps": g(block, r"set resolve-port (\S+)", "enable"),
+        }
+
+    # ═══════════════════════════════════════════════════════════
+    #  THREAT WEIGHT
+    # ═══════════════════════════════════════════════════════════
+    _WEB_CAT_NAMES = {
+        "1": "Drug Abuse",
+        "3": "Hacking",
+        "4": "Illegal or Unethical",
+        "5": "Discrimination",
+        "6": "Explicit Violence",
+        "12": "Extremist Groups",
+        "14": "Proxy Avoidance",
+        "26": "Plagiarism",
+        "59": "Child Sexual Abuse",
+        "61": "Peer-to-peer File Sharing",
+        "62": "Pornography",
+        "72": "Terrorism",
+        "83": "Phishing",
+        "86": "Spam URLs",
+        "96": "Malicious Websites",
+    }
+    _APP_CAT_NAMES = {"2": "P2P", "6": "Proxy"}
+
+    def parse_threat_weight(self) -> dict:
+        block = self._extract_block("log threat-weight")
+        if not block:
+            return {}
+        _LEVELS = {
+            "off": "Off",
+            "low": "Low",
+            "medium": "Medium",
+            "high": "High",
+            "critical": "Critical",
+        }
+
+        def norm(x):
+            return _LEVELS.get((x or "").lower().strip(), "Off")
+
+        def extract_section(section_name, name_map):
+            sub = self._extract_sub_block(block, section_name)
+            if not sub:
+                return {}
+            result = {}
+            for edit_body in re.findall(r"edit \d+(.*?)next", sub, re.DOTALL):
+                cat_m = re.search(r"set category (\d+)", edit_body)
+                level_m = re.search(r"set level (\w+)", edit_body)
+                if cat_m:
+                    cat_label = name_map.get(
+                        cat_m.group(1), f"Category {cat_m.group(1)}"
+                    )
+                    result[cat_label] = norm(level_m.group(1)) if level_m else "Off"
+            return result
+
+        status_m = re.search(r"set status (\S+)", block)
+        return {
+            "status": status_m.group(1) if status_m else "enable",
+            "web": extract_section("web", self._WEB_CAT_NAMES),
+            "application": extract_section("application", self._APP_CAT_NAMES),
         }
