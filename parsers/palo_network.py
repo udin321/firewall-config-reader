@@ -3,6 +3,11 @@
 from parsers.paloalto import PaloAltoParser, _members_el
 
 
+def _tick(val) -> str:
+    """Return ✓ for yes/true/enable/1, empty string otherwise."""
+    return "✓" if str(val).lower() in ("yes", "true", "enable", "1") else ""
+
+
 class PaloNetworkParser(PaloAltoParser):
 
     def _net(self):
