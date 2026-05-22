@@ -60,10 +60,20 @@ class FortiGateParser(
         return m.group(1) if m else "Unknown"
 
     def get_serial_number(self) -> str:
+        # Prefer explicit serial number
         m = re.search(r'set sn "?([^"\s]+)"?', self.content)
-        if not m:
-            m = re.search(r'set csf-device "?([^"\s]+)"?', self.content)
-        return m.group(1) if m else "Unknown"
+        if m:
+            return m.group(1)
+
+        # Find all csf-device values
+        matches = re.findall(r'set csf-device "?([^"\s]+)"?', self.content)
+
+        # Return first value that looks like a FortiGate serial
+        for val in matches:
+            if re.match(r"^FG[A-Z0-9]+$", val) and val.lower() != "all":
+                return val
+
+        return "Unknown"
 
     def get_firmware_version(self) -> str:
         m = re.search(r"config-version=\S+-(.+?)-FW", self.content)
