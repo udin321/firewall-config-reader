@@ -148,18 +148,56 @@ def render_system(parser):
     # ── HA ────────────────────────────────────────────────────
     with tab_ha:
         ha = parser.get_ha_config()
+
         if not ha.get("enabled"):
             st.info("ℹ️ HA is not configured (Standalone mode).")
+
         else:
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Mode", ha.get("mode", "-"))
             c2.metric("Group Name", ha.get("group_name", "-"))
             c3.metric("Priority", ha.get("priority", "-"))
-            c4.metric("Session Pickup", ha.get("session_pickup", "-"))
+            c4.metric(
+                "Session Pickup",
+                "🟢 ON" if ha.get("session_pickup") == "enable" else "⚪ OFF",
+            )
+
             st.divider()
+
             _toggle("Override", ha.get("override", "disable"))
-            if ha.get("heartbeat_dev") and ha["heartbeat_dev"] != "-":
-                st.metric("Heartbeat Device", ha["heartbeat_dev"])
+
+            st.subheader("Heartbeat Interfaces")
+
+            if ha.get("heartbeat_interfaces"):
+                st.write(", ".join(ha["heartbeat_interfaces"]))
+            else:
+                st.write("")
+
+            st.subheader("Monitor Interfaces")
+
+            if ha.get("monitor_interfaces"):
+                st.write(", ".join(ha["monitor_interfaces"]))
+            else:
+                st.write("")
+
+            st.divider()
+
+            st.subheader("Management Interface Reservation")
+
+            _toggle("HA Management", ha.get("ha_mgmt_status", "disable"))
+
+            if ha.get("ha_mgmt_status") == "enable":
+
+                for m in ha.get("ha_mgmt_interfaces", []):
+
+                    st.markdown(f"""
+    **Interface:** {m['interface']}
+
+    **Gateway:** {m['gateway']}
+
+    **Destination Subnet:** {m['destination']}
+    """)
+                    st.divider()
 
     # ── SNMP ──────────────────────────────────────────────────
     with tab_snmp:

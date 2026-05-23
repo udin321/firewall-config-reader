@@ -60,18 +60,15 @@ class FortiGateParser(
         return m.group(1) if m else "Unknown"
 
     def get_serial_number(self) -> str:
-        # Prefer explicit serial number
-        m = re.search(r'set sn "?([^"\s]+)"?', self.content)
-        if m:
-            return m.group(1)
+        patterns = [
+            r'^\s*set\s+sn\s+"?(FG[A-Z0-9]+)"?',
+            r'^\s*set\s+csf-device\s+"?(FG[A-Z0-9]+)"?',
+        ]
 
-        # Find all csf-device values
-        matches = re.findall(r'set csf-device "?([^"\s]+)"?', self.content)
-
-        # Return first value that looks like a FortiGate serial
-        for val in matches:
-            if re.match(r"^FG[A-Z0-9]+$", val) and val.lower() != "all":
-                return val
+        for pattern in patterns:
+            m = re.search(pattern, self.content, re.MULTILINE)
+            if m:
+                return m.group(1)
 
         return "Unknown"
 
@@ -101,25 +98,71 @@ class FortiGateParser(
         body = self._extract_block("system ha")
         if not body:
             return {"enabled": False}
+
         mode_m = re.search(r"set mode (\S+)", body)
         mode = mode_m.group(1) if mode_m else None
+
         if not mode or mode.lower() == "standalone":
             return {"enabled": False}
+
         mode_labels = {"a-p": "Active-Passive", "a-a": "Active-Active"}
+
         group_m = re.search(r'set group-name "([^"]+)"', body)
         pri_m = re.search(r"set priority (\d+)", body)
-        hbdev_m = re.search(r'set hbdev "([^"]+)"', body)
+        hbdev_m = re.search(r"set hbdev (.+)", body)
+
+        heartbeat_interfaces = []
+        if hbdev_m:
+            hb_tokens = hbdev_m.group(1).replace('"', "").split()
+
+            heartbeat_interfaces = hb_tokens[::2]
+
         pickup_m = re.search(r"set session-pickup (\S+)", body)
         override_m = re.search(r"set override (\S+)", body)
-        return {
-            "enabled": True,
-            "mode": mode_labels.get(mode.lower(), mode.upper()),
-            "group_name": group_m.group(1) if group_m else "-",
-            "priority": pri_m.group(1) if pri_m else "-",
-            "heartbeat_dev": hbdev_m.group(1) if hbdev_m else "-",
-            "session_pickup": pickup_m.group(1).capitalize() if pickup_m else "-",
-            "override": override_m.group(1).capitalize() if override_m else "-",
-        }
+        monitor_m = re.search(r"set monitor (.+)", body)
+
+        monitor_interfaces = []
+        if monitor_m:
+            monitor_interfaces = re.findall(r'"([^"]+)"', monitor_m.group(1))
+
+        # HA management reservation
+        mgmt_status_m = re.search(r"set ha-mgmt-status (\S+)", body)
+
+        mgmt_enabled = mgmt_status_m and mgmt_status_m.group(1).lower() == "enable"
+
+        mgmt_details = []
+        if mgmt_enabled:
+            mgmt_block = re.search(r"config ha-mgmt-interfaces(.*?)end", body, re.S)
+
+        if mgmt_block:
+            entries = re.findall(r"edit\s+\d+(.*?)next", mgmt_block.group(1), re.S)
+
+            for e in entries:
+
+                intf = re.search(r'set interface "([^"]+)"', e)
+                gw = re.search(r"set gateway (\S+)", e)
+                dst = re.search(r"set dst (\S+)", e)
+
+                mgmt_details.append(
+                    {
+                        "interface": intf.group(1) if intf else "-",
+                        "gateway": gw.group(1) if gw else "-",
+                        "destination": dst.group(1) if dst else "-",
+                    }
+                )
+
+            return {
+                "enabled": True,
+                "mode": mode_labels.get(mode.lower(), mode.upper()),
+                "group_name": group_m.group(1) if group_m else "-",
+                "priority": pri_m.group(1) if pri_m else "-",
+                "session_pickup": pickup_m.group(1) if pickup_m else "disable",
+                "override": override_m.group(1) if override_m else "disable",
+                "heartbeat_interfaces": heartbeat_interfaces,
+                "monitor_interfaces": monitor_interfaces,
+                "ha_mgmt_status": "enable" if mgmt_enabled else "disable",
+                "ha_mgmt_interfaces": mgmt_details,
+            }
 
     def get_dns(self) -> dict:
         body = self._extract_block("system dns")

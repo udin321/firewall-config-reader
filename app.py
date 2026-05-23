@@ -964,7 +964,6 @@ def main():
                 from views.user_view import render_user_auth
                 from views.wifi_view import render_wifi
                 from views.system_view import render_system
-                from views.policy_lookup_view import render_policy_lookup
                 from views.log_settings_view import render_log_settings
 
                 fg = FortiGateParser(text)
@@ -975,7 +974,6 @@ def main():
                         "🔌 Interfaces",
                         "🌐 Network",
                         "📋 Policy & Objects",
-                        "🔍 Policy Lookup",
                         "🔒 Security",
                         "🔑 VPN",
                         "👤 User & Auth",
@@ -993,18 +991,16 @@ def main():
                 with main_tabs[3]:
                     render_policy_objects(fg)
                 with main_tabs[4]:
-                    render_policy_lookup(fg)
-                with main_tabs[5]:
                     render_security(fg)
-                with main_tabs[6]:
+                with main_tabs[5]:
                     render_vpn(fg)
-                with main_tabs[7]:
+                with main_tabs[6]:
                     render_user_auth(fg)
-                with main_tabs[8]:
+                with main_tabs[7]:
                     render_wifi(fg)
-                with main_tabs[9]:
+                with main_tabs[8]:
                     render_system(fg)
-                with main_tabs[10]:
+                with main_tabs[9]:
                     render_log_settings(fg)
 
         except Exception as e:
