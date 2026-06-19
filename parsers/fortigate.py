@@ -130,10 +130,16 @@ class FortiGateParser(
 
         mgmt_enabled = mgmt_status_m and mgmt_status_m.group(1).lower() == "enable"
 
-        mgmt_details = []
+        # FIX: initialize mgmt_block before the conditional. Previously this
+        # was only assigned inside `if mgmt_enabled:`, so the `if mgmt_block:`
+        # check right after raised UnboundLocalError whenever mgmt_enabled
+        # was False — which is the common case, since HA management
+        # interface reservation is an optional, rarely-used feature.
+        mgmt_block = None
         if mgmt_enabled:
             mgmt_block = re.search(r"config ha-mgmt-interfaces(.*?)end", body, re.S)
 
+        mgmt_details = []
         if mgmt_block:
             entries = re.findall(r"edit\s+\d+(.*?)next", mgmt_block.group(1), re.S)
 
@@ -151,18 +157,24 @@ class FortiGateParser(
                     }
                 )
 
-            return {
-                "enabled": True,
-                "mode": mode_labels.get(mode.lower(), mode.upper()),
-                "group_name": group_m.group(1) if group_m else "-",
-                "priority": pri_m.group(1) if pri_m else "-",
-                "session_pickup": pickup_m.group(1) if pickup_m else "disable",
-                "override": override_m.group(1) if override_m else "disable",
-                "heartbeat_interfaces": heartbeat_interfaces,
-                "monitor_interfaces": monitor_interfaces,
-                "ha_mgmt_status": "enable" if mgmt_enabled else "disable",
-                "ha_mgmt_interfaces": mgmt_details,
-            }
+        # FIX: this return was previously nested inside `if mgmt_block:`,
+        # so whenever HA was enabled but mgmt reservation was off, the
+        # function fell through with no return statement (implicit None),
+        # which would then crash the caller in system_view.py at
+        # `ha.get("enabled")` with AttributeError instead. Now it always
+        # returns the full HA config regardless of mgmt_block's value.
+        return {
+            "enabled": True,
+            "mode": mode_labels.get(mode.lower(), mode.upper()),
+            "group_name": group_m.group(1) if group_m else "-",
+            "priority": pri_m.group(1) if pri_m else "-",
+            "session_pickup": pickup_m.group(1) if pickup_m else "disable",
+            "override": override_m.group(1) if override_m else "disable",
+            "heartbeat_interfaces": heartbeat_interfaces,
+            "monitor_interfaces": monitor_interfaces,
+            "ha_mgmt_status": "enable" if mgmt_enabled else "disable",
+            "ha_mgmt_interfaces": mgmt_details,
+        }
 
     def get_dns(self) -> dict:
         body = self._extract_block("system dns")
@@ -479,9 +491,6 @@ class FortiGateParser(
                         {
                             **base,
                             "Type": "IP Range",
-                            # ====================================
-                            # NEW RESOLVER FIELDS
-                            # ====================================
                             "start_int": (
                                 int(ipaddress.IPv4Address(start_ip))
                                 if start_ip != "-"
@@ -521,13 +530,9 @@ class FortiGateParser(
                                 **base,
                                 "Details": f"{subnet_ip}/{subnet_mask}",
                                 "Type": "Subnet",
-                                # ====================================
-                                # NEW RESOLVER FIELDS
-                                # ====================================
                                 "network": str(network.network_address),
                                 "broadcast": str(network.broadcast_address),
                                 "prefixlen": network.prefixlen,
-                                # important for lookup
                             }
                         )
                     else:
