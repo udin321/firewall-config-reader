@@ -11,6 +11,12 @@ from pathlib import Path
 
 import streamlit as st
 
+# from chatbot import render_chatbox
+
+# TSF (Technical Support File) modules
+from tsf.extractor import validate_and_extract, cleanup_old_sessions
+from tsf.indexer import build_file_index, start_content_indexing, get_index
+
 # ── Page config must be FIRST ────────────────────────────────────────────────
 st.set_page_config(
     page_title="Firewall Config Reader",
@@ -644,6 +650,12 @@ def render_sidebar(vendor: str | None):
                 ("💻", "System"),
                 ("📊", "Log & Report"),
             ]
+        elif vendor == "TSF":
+            nav_items = [
+                ("🗂️", "Explorer"),
+                ("🔎", "Filename Search"),
+                ("📜", "Content Search"),
+            ]
         for icon, name in nav_items:
             st.markdown(
                 f"""
@@ -668,7 +680,6 @@ def render_sidebar(vendor: str | None):
         )
 
 
-# ── Landing / Upload page ─────────────────────────────────────────────────────
 def render_landing():
     assets = Path(__file__).parent / "assets"
 
@@ -679,9 +690,9 @@ def render_landing():
         <h1 style="font-size:32px;font-weight:800;letter-spacing:-1px;margin:0 0 10px">
             Firewall Config Reader
         </h1>
-        <p style="font-size:16px;color:#8b949e;max-width:480px;margin:0 auto">
-            Upload your firewall configuration backup to begin analysis.
-            Supports Palo Alto PAN-OS and FortiGate FortiOS.
+        <p style="font-size:16px;color:#8b949e;max-width:560px;margin:0 auto">
+            Upload your firewall configuration backup or TSF package to begin analysis.
+            Supports Palo Alto PAN-OS, FortiGate FortiOS, and Palo Alto TSF archives.
         </p>
     </div>
     """,
@@ -689,7 +700,7 @@ def render_landing():
     )
 
     # Vendor cards with logos
-    c1, spacer, c2 = st.columns([5, 1, 5])
+    c1, spacer, c2, spacer2, c3 = st.columns([4, 0.5, 4, 0.5, 4])
 
     def _img_b64(path: Path) -> str | None:
         if path.exists():
@@ -740,6 +751,22 @@ def render_landing():
             unsafe_allow_html=True,
         )
 
+    with c3:
+        st.markdown(
+            f"""
+        <div class="vendor-card">
+            <div style="font-size:40px">🗂️</div>
+            <h3>Palo Alto TSF</h3>
+            <p>Technical Support File package</p>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-top:4px">
+                <span class="fw-badge fw-badge-info">TSF Archive</span>
+                <span class="fw-badge fw-badge-info">.zip</span>
+            </div>
+        </div>
+        """,
+            unsafe_allow_html=True,
+        )
+
     st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
 
     # Upload zone
@@ -747,16 +774,23 @@ def render_landing():
         """
     <div class="fw-section-header">
         <div class="dot"></div>
-        Upload Configuration
+        Upload Configuration or TSF Package
     </div>
     """,
         unsafe_allow_html=True,
     )
 
+    # NOTE: type= is intentionally omitted. Streamlit's MIME whitelist
+    # rejects legitimate ZIP variants (application/x-compressed,
+    # application/x-zip-compressed, octet-stream, etc.) that browsers
+    # send for .zip files depending on OS. We do our own extension +
+    # content validation inside sanitize_upload() / tsf/extractor.py.
     uploaded = st.file_uploader(
-        "Drag & drop your firewall backup here, or click to browse",
-        type=["xml", "conf", "txt"],
-        help="Supported: Palo Alto .xml exports | FortiGate .conf / .txt exports",
+        "Drag & drop a config file or TSF .zip package here, or click to browse",
+        help=(
+            "Config files: Palo Alto .xml | FortiGate .conf / .txt  (max 50 MB)\n"
+            "TSF packages: Palo Alto .zip  (max 500 MB)"
+        ),
         label_visibility="visible",
     )
 
@@ -766,11 +800,11 @@ def render_landing():
         <div style="text-align:center;padding:16px;color:#8b949e;font-size:13px">
             <div style="display:flex;align-items:center;justify-content:center;gap:16px;
                         flex-wrap:wrap;margin-top:8px">
-                <span>📂 Max file size: 50 MB</span>
+                <span>📂 Config: max 50 MB | TSF ZIP: max 500 MB</span>
                 <span>•</span>
-                <span>🔒 Files processed in-memory only</span>
+                <span>🔒 Files processed in-memory / temp disk only</span>
                 <span>•</span>
-                <span>🗑️ Config cleared on session end</span>
+                <span>🗑️ Session cleared on browser close</span>
             </div>
         </div>
         """,
@@ -802,38 +836,56 @@ def show_parse_progress(filename: str):
 def sanitize_upload(uploaded_file) -> bytes | None:
     """
     Basic security checks on uploaded file:
-    - Size limit (50 MB)
+    - Size limit (50 MB for config files, 500 MB for TSF ZIP archives)
     - Extension whitelist
-    - No executable signatures
+    - No executable signatures (config files only — ZIP archives are binary
+      by nature and are instead validated by tsf/extractor.py, which does
+      real per-member security screening: path traversal, executable
+      signatures inside the archive, depth limits, size limits, etc.)
     """
-    MAX_MB = 50
-    ALLOWED_EXTS = {".xml", ".conf", ".txt"}
-    FORBIDDEN_SIGS = [
-        b"<script",  # XSS in XML
-        b"<?php",  # PHP injection
-        b"#!/",  # Shell scripts
-        b"\x4d\x5a",  # PE executable (MZ)
-        b"\x7fELF",  # ELF executable
-    ]
+    MAX_CONFIG_MB = 50
+    MAX_TSF_MB = 500
+    ALLOWED_CONFIG_EXTS = {".xml", ".conf", ".txt"}
+    ALLOWED_TSF_EXTS = {".zip"}
 
     name = uploaded_file.name.lower()
     ext = Path(name).suffix
+    is_tsf = ext in ALLOWED_TSF_EXTS
 
-    if ext not in ALLOWED_EXTS:
-        st.error(f"❌ File type `{ext}` not allowed. Use: {', '.join(ALLOWED_EXTS)}")
+    if ext not in ALLOWED_CONFIG_EXTS and not is_tsf:
+        st.error(
+            f"❌ File type `{ext}` not allowed. "
+            f"Use: {', '.join(sorted(ALLOWED_CONFIG_EXTS | ALLOWED_TSF_EXTS))}"
+        )
         return None
 
     content = uploaded_file.read()
 
-    if len(content) > MAX_MB * 1024 * 1024:
-        st.error(f"❌ File exceeds {MAX_MB} MB limit.")
+    size_limit_mb = MAX_TSF_MB if is_tsf else MAX_CONFIG_MB
+    if len(content) > size_limit_mb * 1024 * 1024:
+        kind = "TSF archive" if is_tsf else "File"
+        st.error(f"❌ {kind} exceeds {size_limit_mb} MB limit.")
         return None
 
-    content_lower = content[:512].lower()
-    for sig in FORBIDDEN_SIGS:
-        if sig in content_lower:
-            st.error("❌ File content failed security check.")
-            return None
+    # Executable-signature scan only applies to text config files.
+    # ZIP files legitimately start with binary magic bytes (PK\x03\x04)
+    # that would otherwise look suspicious to a naive signature check —
+    # the real security screening for ZIP contents happens per-member
+    # inside tsf/extractor.py.validate_and_extract().
+    if not is_tsf:
+        FORBIDDEN_SIGS = [
+            b"<script",  # XSS in XML
+            b"<?php",  # PHP injection
+            b"#!/",  # Shell scripts
+            b"\x4d\x5a",  # PE executable (MZ)
+            b"\x7fELF",  # ELF executable
+        ]
+
+        content_lower = content[:512].lower()
+        for sig in FORBIDDEN_SIGS:
+            if sig in content_lower:
+                st.error("❌ File content failed security check.")
+                return None
 
     return content
 
@@ -854,161 +906,332 @@ def main():
     # Topbar
     render_topbar()
 
-    # ── Route based on loaded config ──────────────────
-    if "parsed_data" not in st.session_state:
-        # Landing page
+    # ── Route based on loaded config / TSF session ────
+    # Two independent state flags drive routing:
+    #   "parsed_data"   → an .xml/.conf/.txt config is loaded (existing flow)
+    #   "tsf_session_id" → a TSF .zip has been extracted (new flow)
+    # They are mutually exclusive in practice since "New Config" clears both,
+    # and the upload handler below only ever sets one or the other.
+    has_config = "parsed_data" in st.session_state
+    has_tsf = "tsf_session_id" in st.session_state
+
+    if not has_config and not has_tsf:
+        # ── Landing page ───────────────────────────────
         render_sidebar(None)
         uploaded = render_landing()
 
         if uploaded:
             content = sanitize_upload(uploaded)
             if content:
-                show_parse_progress(uploaded.name)
-                st.session_state.raw_content = content
-                st.session_state.filename = uploaded.name
-                # Detect vendor
                 name_lower = uploaded.name.lower()
-                if name_lower.endswith(".xml"):
-                    st.session_state.vendor = "Palo Alto"
+
+                if name_lower.endswith(".zip"):
+                    # ── TSF package: extract + index, don't touch the
+                    # existing config-parsing state at all ──────────────
+                    _handle_tsf_upload(content)
                 else:
-                    st.session_state.vendor = "FortiGate"
-                st.session_state.parsed_data = True
-                st.rerun()
-    else:
-        vendor = st.session_state.get("vendor", "Unknown")
-        render_sidebar(vendor)
+                    # ── Existing config flow, unchanged ──────────────────
+                    show_parse_progress(uploaded.name)
+                    st.session_state.raw_content = content
+                    st.session_state.filename = uploaded.name
+                    if name_lower.endswith(".xml"):
+                        st.session_state.vendor = "Palo Alto"
+                    else:
+                        st.session_state.vendor = "FortiGate"
+                    st.session_state.parsed_data = True
+                    st.rerun()
+        return
 
-        # ── Action bar ────────────────────────────────
-        col_title, col_badge, col_btn = st.columns([6, 2, 2])
-        with col_title:
-            st.markdown(
-                f"""
-            <div class="fw-section-header">
-                <div class="dot"></div>
-                {vendor} — {st.session_state.get('filename','config')}
-            </div>
-            """,
-                unsafe_allow_html=True,
+    if has_tsf:
+        _render_tsf_session()
+        return
+
+    # ── Existing config viewer flow (unchanged) ───────
+    vendor = st.session_state.get("vendor", "Unknown")
+    render_sidebar(vendor)
+
+    # ── Action bar ────────────────────────────────
+    col_title, col_badge, col_btn = st.columns([6, 2, 2])
+    with col_title:
+        st.markdown(
+            f"""
+        <div class="fw-section-header">
+            <div class="dot"></div>
+            {vendor} — {st.session_state.get('filename','config')}
+        </div>
+        """,
+            unsafe_allow_html=True,
+        )
+    with col_badge:
+        st.markdown(
+            f"""
+        <div style="padding-top:8px">
+            <span class="fw-badge fw-badge-allow">
+                <span class="status-dot-live"></span> Loaded
+            </span>
+        </div>
+        """,
+            unsafe_allow_html=True,
+        )
+    with col_btn:
+        st.markdown(
+            '<div style="display:flex;justify-content:flex-end;padding-top:4px">',
+            unsafe_allow_html=True,
+        )
+        if st.button("⬅ New Config", key="unload_btn"):
+            for k in ["parsed_data", "raw_content", "filename", "vendor"]:
+                st.session_state.pop(k, None)
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # ── Load actual parsers & render ──────────────
+    try:
+        content = st.session_state.raw_content
+
+        if vendor == "Palo Alto":
+            import xml.etree.ElementTree as ET
+            from parsers.palo_policies import PaloPoliciesParser
+            from parsers.palo_objects import PaloObjectsParser
+            from parsers.palo_network import PaloNetworkParser
+            from parsers.palo_device import PaloDeviceParser
+            from parsers.palo_dashboard import PaloDashboardParser
+
+            from views.palo_policies_views import render_pa_policies
+            from views.palo_objects_views import render_pa_objects
+            from views.palo_network_views import render_pa_network
+            from views.palo_device_views import render_pa_device
+            from views.palo_dashboard_views import render_pa_dashboard
+
+            root = ET.fromstring(content.lstrip(b"\xef\xbb\xbf"))
+
+            main_tabs = st.tabs(
+                [
+                    "🏠 Dashboard",
+                    "📋 Policies",
+                    "📦 Objects",
+                    "🌐 Network",
+                    "⚙️ Device",
+                ]
             )
-        with col_badge:
-            st.markdown(
-                f"""
-            <div style="padding-top:8px">
-                <span class="fw-badge fw-badge-allow">
-                    <span class="status-dot-live"></span> Loaded
-                </span>
-            </div>
-            """,
-                unsafe_allow_html=True,
+            with main_tabs[0]:
+                render_pa_dashboard(PaloDashboardParser(root))
+            with main_tabs[1]:
+                render_pa_policies(PaloPoliciesParser(root))
+            with main_tabs[2]:
+                render_pa_objects(PaloObjectsParser(root))
+            with main_tabs[3]:
+                render_pa_network(PaloNetworkParser(root))
+            with main_tabs[4]:
+                render_pa_device(PaloDeviceParser(root))
+
+        else:  # FortiGate
+            text = content.decode("utf-8", errors="replace")
+            from parsers.fortigate import FortiGateParser
+            from views.summary_view import render_summary
+            from views.interface_view import render_interfaces
+            from views.network_view import render_network
+            from views.policy_objects_view import render_policy_objects
+            from views.security_view import render_security
+            from views.vpn_view import render_vpn
+            from views.user_view import render_user_auth
+            from views.wifi_view import render_wifi
+            from views.system_view import render_system
+            from views.log_settings_view import render_log_settings
+
+            fg = FortiGateParser(text)
+
+            main_tabs = st.tabs(
+                [
+                    "🏠 Summary",
+                    "🔌 Interfaces",
+                    "🌐 Network",
+                    "📋 Policy & Objects",
+                    "🔒 Security",
+                    "🔑 VPN",
+                    "👤 User & Auth",
+                    "📡 WiFi & Switch",
+                    "💻 System",
+                    "📊 Log & Report",
+                ]
             )
-        with col_btn:
-            st.markdown(
-                '<div style="display:flex;justify-content:flex-end;padding-top:4px">',
-                unsafe_allow_html=True,
-            )
-            if st.button("⬅ New Config", key="unload_btn"):
-                for k in ["parsed_data", "raw_content", "filename", "vendor"]:
-                    st.session_state.pop(k, None)
-                st.rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
+            with main_tabs[0]:
+                render_summary(fg)
+            with main_tabs[1]:
+                render_interfaces(fg.parse_interfaces(), "FortiGate")
+            with main_tabs[2]:
+                render_network(fg)
+            with main_tabs[3]:
+                render_policy_objects(fg)
+            with main_tabs[4]:
+                render_security(fg)
+            with main_tabs[5]:
+                render_vpn(fg)
+            with main_tabs[6]:
+                render_user_auth(fg)
+            with main_tabs[7]:
+                render_wifi(fg)
+            with main_tabs[8]:
+                render_system(fg)
+            with main_tabs[9]:
+                render_log_settings(fg)
 
-        # ── Load actual parsers & render ──────────────
-        try:
-            content = st.session_state.raw_content
+    except Exception as e:
+        st.error(f"❌ Error loading config: {e}")
+        import traceback
 
-            if vendor == "Palo Alto":
-                import xml.etree.ElementTree as ET
-                from parsers.palo_policies import PaloPoliciesParser
-                from parsers.palo_objects import PaloObjectsParser
-                from parsers.palo_network import PaloNetworkParser
-                from parsers.palo_device import PaloDeviceParser
-                from parsers.palo_dashboard import PaloDashboardParser
+        with st.expander("🔍 Error details"):
+            st.code(traceback.format_exc())
 
-                from views.palo_policies_views import render_pa_policies
-                from views.palo_objects_views import render_pa_objects
-                from views.palo_network_views import render_pa_network
-                from views.palo_device_views import render_pa_device
-                from views.palo_dashboard_views import render_pa_dashboard
+    # ── Floating AI chatbox (bottom-right) ─────────
+    # Shown only once a config is successfully loaded, since it needs
+    # the raw config text as context for answering questions.
+    # render_chatbox(
+    #    vendor=vendor,
+    #    filename=st.session_state.get("filename", "config"),
+    #    raw_text=content.decode("utf-8", errors="replace"),
+    # )
 
-                root = ET.fromstring(content.decode("utf-8", errors="replace"))
 
-                main_tabs = st.tabs(
-                    [
-                        "🏠 Dashboard",
-                        "📋 Policies",
-                        "📦 Objects",
-                        "🌐 Network",
-                        "⚙️ Device",
-                    ]
-                )
-                with main_tabs[0]:
-                    render_pa_dashboard(PaloDashboardParser(root))
-                with main_tabs[1]:
-                    render_pa_policies(PaloPoliciesParser(root))
-                with main_tabs[2]:
-                    render_pa_objects(PaloObjectsParser(root))
-                with main_tabs[3]:
-                    render_pa_network(PaloNetworkParser(root))
-                with main_tabs[4]:
-                    render_pa_device(PaloDeviceParser(root))
+# ── TSF upload / extraction / routing ─────────────────────────────────────────
 
-            else:  # FortiGate
-                text = content.decode("utf-8", errors="replace")
-                from parsers.fortigate import FortiGateParser
-                from views.summary_view import render_summary
-                from views.interface_view import render_interfaces
-                from views.network_view import render_network
-                from views.policy_objects_view import render_policy_objects
-                from views.security_view import render_security
-                from views.vpn_view import render_vpn
-                from views.user_view import render_user_auth
-                from views.wifi_view import render_wifi
-                from views.system_view import render_system
-                from views.log_settings_view import render_log_settings
 
-                fg = FortiGateParser(text)
+def _handle_tsf_upload(zip_bytes: bytes):
+    """
+    Validate + extract a TSF ZIP, build the file index, kick off background
+    content-indexing, and switch session state into TSF Explorer mode.
 
-                main_tabs = st.tabs(
-                    [
-                        "🏠 Summary",
-                        "🔌 Interfaces",
-                        "🌐 Network",
-                        "📋 Policy & Objects",
-                        "🔒 Security",
-                        "🔑 VPN",
-                        "👤 User & Auth",
-                        "📡 WiFi & Switch",
-                        "💻 System",
-                        "📊 Log & Report",
-                    ]
-                )
-                with main_tabs[0]:
-                    render_summary(fg)
-                with main_tabs[1]:
-                    render_interfaces(fg.parse_interfaces(), "FortiGate")
-                with main_tabs[2]:
-                    render_network(fg)
-                with main_tabs[3]:
-                    render_policy_objects(fg)
-                with main_tabs[4]:
-                    render_security(fg)
-                with main_tabs[5]:
-                    render_vpn(fg)
-                with main_tabs[6]:
-                    render_user_auth(fg)
-                with main_tabs[7]:
-                    render_wifi(fg)
-                with main_tabs[8]:
-                    render_system(fg)
-                with main_tabs[9]:
-                    render_log_settings(fg)
+    Uses the real progress callback from tsf/extractor.py to drive a live
+    Streamlit progress bar rather than the simulated one used for config
+    files — TSF extraction can take tens of seconds on large archives, so a
+    fake progress bar would be actively misleading.
+    """
+    st.info("📦 TSF package detected. Preparing analysis environment…")
 
-        except Exception as e:
-            st.error(f"❌ Error loading config: {e}")
-            import traceback
+    progress_bar = st.progress(0, text="Starting extraction…")
 
-            with st.expander("🔍 Error details"):
-                st.code(traceback.format_exc())
+    def _on_progress(frac: float, msg: str):
+        progress_bar.progress(min(1.0, max(0.0, frac)), text=f"⚙️ {msg}")
+
+    # Opportunistic cleanup of old sessions before creating a new one,
+    # so long-running deployments don't accumulate unbounded temp data.
+    cleanup_old_sessions(max_age_hours=6)
+
+    result = validate_and_extract(zip_bytes, progress_cb=_on_progress)
+    progress_bar.empty()
+
+    if not result.success:
+        st.error(f"❌ TSF extraction failed: {result.error}")
+        return
+
+    if result.skipped:
+        with st.expander(f"⚠️ {len(result.skipped)} item(s) skipped during extraction"):
+            st.code("\n".join(result.skipped[:200]))
+            if len(result.skipped) > 200:
+                st.caption(f"…and {len(result.skipped) - 200} more.")
+
+    # Build the filename/directory index synchronously (fast — metadata only)
+    with st.spinner("Indexing directory structure…"):
+        build_file_index(result.session_id, result.session_path)
+
+    # Kick off content indexing in a background thread — the Explorer page
+    # renders immediately and shows a progress banner while this runs.
+    start_content_indexing(result.session_id)
+
+    st.session_state.tsf_session_id = result.session_id
+    st.session_state.tsf_filename = getattr(
+        st.session_state, "filename", "tsf_package.zip"
+    )
+    st.session_state.vendor = "TSF"
+    st.session_state.filename = "TSF Package"
+
+    st.success(f"✅ Extracted {result.total_files:,} files. Opening TSF Explorer…")
+    st.rerun()
+
+
+def _render_tsf_session():
+    """Render the TSF Explorer page once a TSF session is active."""
+    from tsf.extractor import get_session_path
+    from views.tsf_explorer import render_tsf_explorer
+
+    session_id = st.session_state.tsf_session_id
+    render_sidebar("TSF")
+
+    # ── Action bar (mirrors the config-viewer action bar for consistency) ──
+    col_title, col_badge, col_btn = st.columns([6, 2, 2])
+    with col_title:
+        st.markdown(
+            f"""
+        <div class="fw-section-header">
+            <div class="dot"></div>
+            TSF Package — {st.session_state.get('tsf_filename', 'package.zip')}
+        </div>
+        """,
+            unsafe_allow_html=True,
+        )
+    with col_badge:
+        st.markdown(
+            """
+        <div style="padding-top:8px">
+            <span class="fw-badge fw-badge-allow">
+                <span class="status-dot-live"></span> Extracted
+            </span>
+        </div>
+        """,
+            unsafe_allow_html=True,
+        )
+    with col_btn:
+        st.markdown(
+            '<div style="display:flex;justify-content:flex-end;padding-top:4px">',
+            unsafe_allow_html=True,
+        )
+        if st.button("⬅ New Upload", key="tsf_unload_btn"):
+            from tsf.extractor import cleanup_session
+            from tsf.indexer import drop_index
+
+            cleanup_session(session_id)
+            drop_index(session_id)
+            for k in [
+                "tsf_session_id",
+                "tsf_filename",
+                "vendor",
+                "filename",
+                "tsf_open_dirs",
+                "tsf_open_file",
+                "tsf_preview",
+                "tsf_page",
+                "tsf_jump_line",
+                "tsf_search_q",
+                "tsf_search_mode",
+                "tsf_fn_results",
+                "tsf_ct_results",
+            ]:
+                st.session_state.pop(k, None)
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    session_path = get_session_path(session_id)
+    if session_path is None:
+        st.error(
+            "❌ This TSF session has expired or was cleaned up. "
+            "Please upload the package again."
+        )
+        return
+
+    index_state = get_index(session_id)
+    if index_state is None:
+        st.error(
+            "❌ Index not found for this session. Please upload the package again."
+        )
+        return
+
+    try:
+        render_tsf_explorer(index_state)
+    except Exception as e:
+        st.error(f"❌ Error rendering TSF Explorer: {e}")
+        import traceback
+
+        with st.expander("🔍 Error details"):
+            st.code(traceback.format_exc())
 
 
 if __name__ == "__main__":

@@ -5,6 +5,12 @@ FortiGate — Log & Report tab (beside System in main tabs).
 Sub-tabs:
   📋 Log Settings   — Global Settings, Local Logs, GUI Preferences
   ⚖️  Threat Weight  — Application, IPS, Botnet, Malware, Packet, Web, Risk Levels
+
+THEME FIX: every helper below previously hardcoded colors meant for dark
+mode only (e.g. text color #e6edf3, a light gray, on an assumed-dark
+background). When the app's light theme was active, that produced
+near-invisible text on a white background. All helpers now read
+st.session_state.theme and pick a contrasting palette for either mode.
 """
 
 from __future__ import annotations
@@ -12,6 +18,34 @@ import io
 import streamlit as st
 import pandas as pd
 from views.table_utils import st_table
+
+# ── theme-aware palette ──────────────────────────────────────────────────────
+
+
+def _palette():
+    """Return a dict of colors with sufficient contrast for the active theme.
+
+    Called fresh each render (not cached) since the user can flip the
+    theme toggle at any time via st.session_state.theme.
+    """
+    theme = st.session_state.get("theme", "dark")
+    if theme == "dark":
+        return {
+            "text": "#e6edf3",
+            "text_dim": "#8b949e",
+            "card_bg": "#161b22",
+            "card_border": "#30363d",
+            "accent": "#3a7bd5",
+        }
+    else:
+        return {
+            "text": "#1f2328",
+            "text_dim": "#57606a",
+            "card_bg": "#f6f8fa",
+            "card_border": "#d0d7de",
+            "accent": "#0969da",
+        }
+
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -21,19 +55,22 @@ def _on(v: str) -> bool:
 
 
 def _toggle_row(label: str, value: str, hint: str = ""):
+    pal = _palette()
     on = _on(value)
+    # ON/OFF badge colors stay the same in both themes (green/red read fine
+    # on both light and dark backgrounds since they carry their own fill).
     color = "#3fb950" if on else "#f85149"
     text = "ON" if on else "OFF"
     hint_html = (
-        f'<div style="font-size:11px;color:#8b949e;margin-top:1px">{hint}</div>'
+        f'<div style="font-size:11px;color:{pal["text_dim"]};margin-top:1px">{hint}</div>'
         if hint
         else ""
     )
     st.markdown(
         f'<div style="display:flex;justify-content:space-between;align-items:center;'
         f"padding:10px 14px;margin:4px 0;border-radius:10px;"
-        f'background:#161b22;border:1px solid #30363d">'
-        f'<div><span style="color:#e6edf3;font-size:13px;font-weight:500">{label}</span>'
+        f'background:{pal["card_bg"]};border:1px solid {pal["card_border"]}">'
+        f'<div><span style="color:{pal["text"]};font-size:13px;font-weight:500">{label}</span>'
         f"{hint_html}</div>"
         f'<span style="color:{color};font-weight:800;font-size:12px;padding:4px 12px;'
         f"border-radius:20px;background:{color}22;border:1px solid {color}55;"
@@ -43,19 +80,21 @@ def _toggle_row(label: str, value: str, hint: str = ""):
 
 
 def _section(icon: str, title: str):
+    pal = _palette()
     st.markdown(
         f'<div style="display:flex;align-items:center;gap:8px;'
-        f'margin:20px 0 8px;border-left:3px solid #3a7bd5;padding-left:10px">'
+        f'margin:20px 0 8px;border-left:3px solid {pal["accent"]};padding-left:10px">'
         f'<span style="font-size:15px">{icon}</span>'
-        f'<span style="font-size:15px;font-weight:700;color:#e6edf3">{title}</span>'
+        f'<span style="font-size:15px;font-weight:700;color:{pal["text"]}">{title}</span>'
         f"</div>",
         unsafe_allow_html=True,
     )
 
 
 def _card(title: str):
+    pal = _palette()
     st.markdown(
-        f'<div style="font-size:11px;color:#8b949e;font-weight:700;'
+        f'<div style="font-size:11px;color:{pal["text_dim"]};font-weight:700;'
         f'text-transform:uppercase;letter-spacing:.6px;margin:14px 0 5px">{title}</div>',
         unsafe_allow_html=True,
     )
@@ -73,6 +112,9 @@ def _csv_dl(rows: list, fname: str, key: str):
 
 # ── Threat level badge row ──────────────────────────────────────────────────────
 
+# Foreground/background pairs for each level badge. These already carry
+# their own fill colors (not relying on page background for contrast), so
+# they work in both themes as-is — left unchanged.
 _FG = {
     "Off": "#95a5a6",
     "Low": "#3498db",
@@ -91,6 +133,7 @@ _LVL = ["Off", "Low", "Medium", "High", "Critical"]
 
 
 def _level_row(label: str, chosen: str):
+    pal = _palette()
     badges = ""
     for lv in _LVL:
         fg, bg = _FG.get(lv, "#95a5a6"), _BG.get(lv, "#2c3e50")
@@ -108,8 +151,8 @@ def _level_row(label: str, chosen: str):
     st.markdown(
         f'<div style="display:flex;align-items:center;justify-content:space-between;'
         f"padding:8px 12px;margin:3px 0;border-radius:9px;"
-        f'background:#161b22;border:1px solid #30363d">'
-        f'<span style="color:#e6edf3;font-size:13px;min-width:240px">{label}</span>'
+        f'background:{pal["card_bg"]};border:1px solid {pal["card_border"]}">'
+        f'<span style="color:{pal["text"]};font-size:13px;min-width:240px">{label}</span>'
         f'<div style="display:flex;flex-wrap:nowrap;gap:1px">{badges}</div></div>',
         unsafe_allow_html=True,
     )
@@ -322,12 +365,13 @@ def _threat_weight_tab(fg):
 
 def render_log_settings(fg):
     """Called from app.py as the 'Log & Report' tab."""
+    pal = _palette()
     st.markdown(
         '<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">'
         '<span style="font-size:22px">📊</span>'
-        '<span style="font-size:20px;font-weight:800;color:#e6edf3">Log & Report</span>'
+        f'<span style="font-size:20px;font-weight:800;color:{pal["text"]}">Log & Report</span>'
         "</div>"
-        '<div style="font-size:13px;color:#8b949e;margin-bottom:16px">'
+        f'<div style="font-size:13px;color:{pal["text_dim"]};margin-bottom:16px">'
         "Logging and threat weight configuration — parsed from the FortiGate config file.</div>",
         unsafe_allow_html=True,
     )

@@ -1,19 +1,55 @@
-"""views/system_view.py — FortiGate System tab. Administrators section uses st_table."""
+"""views/system_view.py — FortiGate System tab. Administrators section uses st_table.
+
+THEME FIX: _toggle and _scope_selector previously hardcoded a light-mode-only
+palette (e.g. background:#f5f5f5 with no dark-mode counterpart, or vice versa
+for other helpers). Both now read st.session_state.theme and pick a
+contrasting palette so text/backgrounds stay readable in either mode.
+"""
 
 import streamlit as st
 import pandas as pd
 from views.table_utils import st_table
 
 
+def _palette():
+    """Theme-aware colors, recomputed each render since the user can toggle
+    the theme at any time via st.session_state.theme."""
+    theme = st.session_state.get("theme", "dark")
+    if theme == "dark":
+        return {
+            "text": "#e6edf3",
+            "text_dim": "#8b949e",
+            "off_bg": "#21262d",
+            "off_fg": "#8b949e",
+            "sel_bg": "#3a7bd5",
+            "unsel_bg": "#21262d",
+            "unsel_fg": "#8b949e",
+        }
+    else:
+        return {
+            "text": "#1f2328",
+            "text_dim": "#57606a",
+            "off_bg": "#eaeef2",
+            "off_fg": "#57606a",
+            "sel_bg": "#0969da",
+            "unsel_bg": "#eaeef2",
+            "unsel_fg": "#57606a",
+        }
+
+
 def _toggle(label, value):
+    pal = _palette()
     on = str(value).lower() in ["enable", "on", "1", "true"]
-    color = "#2ecc71" if on else "#ccc"
-    bg = "#e8f8f0" if on else "#f5f5f5"
+    # ON/OFF fill colors carry their own contrast (green/gray chip on
+    # white text) so they're left as literal values, but the row
+    # background/label now adapt to the theme instead of assuming light mode.
+    color = "#2ecc71" if on else pal["off_fg"]
+    bg = "#e8f8f0" if on else pal["off_bg"]
     text = "ON" if on else "OFF"
     st.markdown(
         f'<div style="display:flex;align-items:center;justify-content:space-between;'
         f'background:{bg};border-radius:8px;padding:8px 14px;margin:4px 0;">'
-        f'<span style="font-size:13px">{label}</span>'
+        f'<span style="font-size:13px;color:{pal["text"]}">{label}</span>'
         f'<span style="background:{color};color:white;padding:2px 12px;'
         f'border-radius:12px;font-size:12px;font-weight:bold">{text}</span></div>',
         unsafe_allow_html=True,
@@ -21,6 +57,7 @@ def _toggle(label, value):
 
 
 def _scope_selector(current_scope):
+    pal = _palette()
     scopes = [
         ("off", "Off"),
         ("admin", "Admin"),
@@ -30,8 +67,8 @@ def _scope_selector(current_scope):
     cols = st.columns(len(scopes))
     for col, (val, label) in zip(cols, scopes):
         is_sel = current_scope.lower() == val
-        bg = "#2c3e50" if is_sel else "#ecf0f1"
-        fg = "white" if is_sel else "#666"
+        bg = pal["sel_bg"] if is_sel else pal["unsel_bg"]
+        fg = "white" if is_sel else pal["unsel_fg"]
         col.markdown(
             f'<div style="background:{bg};color:{fg};border-radius:8px;padding:10px;'
             f'text-align:center;font-weight:{"bold" if is_sel else "normal"};font-size:13px">'
