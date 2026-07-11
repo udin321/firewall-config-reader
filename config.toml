@@ -14,3 +14,8 @@ headless = true
 
 [browser]
 gatherUsageStats = false
+
+[server]
+maxUploadSize = 500
+enableCORS = false
+enableXsrfProtection = false
