@@ -4,5 +4,4 @@ __pycache__/
 .vscode/
 *.conf
 *.xml
-.streamlit/secrets.toml
-chatbot.py
+
