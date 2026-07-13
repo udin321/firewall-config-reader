@@ -11,7 +11,7 @@ from pathlib import Path
 
 import streamlit as st
 
-# from chatbot import render_chatbox
+from chatbot import render_chatbox
 
 # TSF (Technical Support File) modules
 from tsf.extractor import validate_and_extract, cleanup_old_sessions
@@ -1085,11 +1085,11 @@ def main():
     # ── Floating AI chatbox (bottom-right) ─────────
     # Shown only once a config is successfully loaded, since it needs
     # the raw config text as context for answering questions.
-    # render_chatbox(
-    #    vendor=vendor,
-    #    filename=st.session_state.get("filename", "config"),
-    #    raw_text=content.decode("utf-8", errors="replace"),
-    # )
+    render_chatbox(
+        vendor=vendor,
+        filename=st.session_state.get("filename", "config"),
+        raw_text=content.decode("utf-8", errors="replace"),
+    )
 
 
 # ── TSF upload / extraction / routing ─────────────────────────────────────────

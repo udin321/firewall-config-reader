@@ -5,3 +5,4 @@ __pycache__/
 *.conf
 *.xml
 .streamlit/secrets.toml
+chatbot.py
